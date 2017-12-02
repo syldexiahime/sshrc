@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 function generate_minified_rcfile() {
-    hash=$(md5sum $SSHHOME/.sshrc | awk '{print $1}')
     local temprc=$(sed -r "/(^\s*#(\s|\S)*$)/d" "$SSHHOME/.sshrc")
     IFS_OLD=$IFS
     IFS=$'\n'
     local sourcefiles=($(grep -oP "(?<=source )(\"(\s\S)+\"|\S+)" <<<"$temprc"))
     IFS=$IFS_OLD
-    local minrc="##md5hash: ${hash}"$'\n'
+    local minrc=""
     while IFS= read -r line; do
         local writeline="true"
         for f in ${sourcefiles[@]}; do
             if [[ $(grep "^\s*source $f" <<<"$line") != "" ]]; then
+                local writeline="false"
                 local file=$(envsubst <<< "${f/\~/'$HOME'}")
                 local cont=$(sed -r "/(^\s*#(\s|\S)*$)/d" "$file")
                 local minrc="$minrc"$'\n'"$cont"$'\n'
                 local sourcefiles=("${sourcefiles[@]/$f}")
-                local writeline="false"
             fi
         done
         if [[ "$writeline" == "true" ]]; then
@@ -25,35 +24,45 @@ function generate_minified_rcfile() {
     minrc=$(sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" <<<"$minrc")
     echo "$minrc" > "$SSHHOME/.sshrc.d/.sshrc.min"
 }
-function sshrc() {
-    local SSHHOME=${SSHHOME:=~}
-    if [ -f $SSHHOME/.sshrc ]; then
-        generate_minified_rcfile
-        local files=".sshrc.d .sshrc.d/.sshrc.min"
-        SIZE=$(tar cfz - -h -C $SSHHOME $files | wc -c)
-        if [ $SIZE -gt 65536 ]; then
-            echo >&2 $'.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: '$SIZE' bytes'
-            exit 1
-        fi
-        if [ -z "$CMDARG" -a ! -e ~/.sshrc.d/.hushlogin ]; then
-            WELCOME_MSG="
-                if [ ! -e ~/.hushlogin ]; then
-                    if [ -e /etc/motd ]; then cat /etc/motd; fi
-                    if [ -e /etc/update-motd.d ]; then run-parts /etc/update-motd.d/ 2>/dev/null; fi
-                    last -F \$USER 2>/dev/null | grep -v 'still logged in' | head -n1 | awk '{print \"Last login:\",\$4,\$5,\$6,\$7,\$8,\"from\",\$3;}'
-                fi
-                "
-        else
-            WELCOME_MSG=""
-        fi
-        ssh -t "$DOMAIN" $SSHARGS "
-            command -v openssl >/dev/null 2>&1 || { echo >&2 \"sshrc requires openssl to be installed on the server, but it's not. Aborting.\"; exit 1; }
-            $WELCOME_MSG
+
+function build_remote_sshrc_dir() {
+    echo "
             export SSHHOME=\$(mktemp -d -t .$(whoami).sshrc.XXXX)
             export SSHRCCLEANUP=\$SSHHOME
             trap \"rm -rf \$SSHRCCLEANUP; exit\" 0
-            echo $'"$(cat "$0" | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/sshrc
+        "
+}
+
+function show_welcome_message() {
+    if [ -z "$CMDARG" -a ! -e ~/.sshrc.d/.hushlogin ]; then
+        echo "
+            if [ ! -e ~/.hushlogin ]; then
+                if [ -e /etc/motd ]; then cat /etc/motd; fi
+                if [ -e /etc/update-motd.d ]; then run-parts /etc/update-motd.d/ 2>/dev/null; fi
+                last -F \$USER 2>/dev/null | grep -v 'still logged in' | head -n1 | awk '{print \"Last login:\",\$4,\$5,\$6,\$7,\$8,\"from\",\$3;}'
+            fi
+            "
+    else
+        echo ""
+    fi
+}
+
+function include_files() {
+    echo "
+            echo $'"$(tar czf - -h -C $SSHHOME $files | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d | tar mxzf - -C \$SSHHOME
+            export SSHHOME=\$SSHHOME
+        "
+}
+
+function include_sshrc_bin() {
+    echo "
+            echo $'"$(sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*#(\s|\S)*$)/d" "$0" | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/sshrc
             chmod +x \$SSHHOME/sshrc
+        "
+}
+
+function source_remote_rcfiles() {
+    echo "
             echo $'"$( cat << 'EOF' | openssl enc -base64
 if [ -r /etc/profile ]; then source /etc/profile; fi
 if [ -r ~/.bash_profile ]; then source ~/.bash_profile
@@ -64,6 +73,13 @@ export PATH=$PATH:$SSHHOME
 source $SSHHOME/.sshrc.d/.sshrc.min;
 EOF
                 )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/sshrc.bashrc
+            echo \"$CMDARG\" >> \$SSHHOME/sshrc.bashrc
+            bash --rcfile \$SSHHOME/sshrc.bashrc
+        "
+}
+
+function do_something() {
+    echo "
             echo $'"$( cat << 'EOF' | openssl enc -base64
 #!/usr/bin/env bash
 exec bash --rcfile <(echo '
@@ -78,16 +94,37 @@ export PATH=$PATH:'$SSHHOME'
 EOF
                 )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/bashsshrc
             chmod +x \$SSHHOME/bashsshrc
-            echo $'"$(tar czf - -h -C $SSHHOME $files | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d | tar mxzf - -C \$SSHHOME
-            export SSHHOME=\$SSHHOME
-            echo \"$CMDARG\" >> \$SSHHOME/sshrc.bashrc
-            bash --rcfile \$SSHHOME/sshrc.bashrc
-            "
+        "
+}
+
+function build_sshrc_arg() {
+    echo "
+            command -v openssl >/dev/null 2>&1 || { echo >&2 \"sshrc requires openssl to be installed on the server, but it's not. Aborting.\"; exit 1; }
+            $(build_remote_sshrc_dir)
+            $(show_welcome_message)
+            $(include_files)
+            $(include_sshrc_bin)
+            $(source_remote_rcfiles)
+        "
+}
+
+function sshrc() {
+    local SSHHOME=${SSHHOME:=~}
+    if [ -f $SSHHOME/.sshrc ]; then
+        generate_minified_rcfile
+        local files=".sshrc.d .sshrc.d/.sshrc.min"
+        SIZE=$(tar cfz - -h -C $SSHHOME $files | wc -c)
+        if [ $SIZE -gt 65536 ]; then
+            echo >&2 $'.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: '$SIZE' bytes'
+            exit 1
+        fi
+        ssh -t "$DOMAIN" $SSHARGS "$(build_sshrc_arg)"
     else
         echo "No such file: $SSHHOME/.sshrc" >&2
         exit 1
     fi
 }
+
 function sshrc_parse() {
   while [[ -n $1 ]]; do
     case $1 in
