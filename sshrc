@@ -1,11 +1,35 @@
 #!/usr/bin/env bash
+function generate_minified_rcfile() {
+    hash=$(md5sum $SSHHOME/.sshrc | awk '{print $1}')
+    local temprc=$(sed -r "/(^\s*#(\s|\S)*$)/d" "$SSHHOME/.sshrc")
+    IFS_OLD=$IFS
+    IFS=$'\n'
+    local sourcefiles=($(grep -oP "(?<=source )(\"(\s\S)+\"|\S+)" <<<"$temprc"))
+    IFS=$IFS_OLD
+    local minrc="##md5hash: ${hash}"$'\n'
+    while IFS= read -r line; do
+        local writeline="true"
+        for f in ${sourcefiles[@]}; do
+            if [[ $(grep "^\s*source $f" <<<"$line") != "" ]]; then
+                local file=$(envsubst <<< "${f/\~/'$HOME'}")
+                local cont=$(sed -r "/(^\s*#(\s|\S)*$)/d" "$file")
+                local minrc="$minrc"$'\n'"$cont"$'\n'
+                local sourcefiles=("${sourcefiles[@]/$f}")
+                local writeline="false"
+            fi
+        done
+        if [[ "$writeline" == "true" ]]; then
+            minrc="${minrc}${line}"$'\n'
+        fi
+    done <<<"$temprc"
+    minrc=$(sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" <<<"$minrc")
+    echo "$minrc" > "$SSHHOME/.sshrc.d/.sshrc.min"
+}
 function sshrc() {
     local SSHHOME=${SSHHOME:=~}
     if [ -f $SSHHOME/.sshrc ]; then
-        local files=.sshrc
-        if [ -d $SSHHOME/.sshrc.d ]; then
-            files="$files .sshrc.d"
-        fi
+        generate_minified_rcfile
+        local files=".sshrc.d .sshrc.d/.sshrc.min"
         SIZE=$(tar cfz - -h -C $SSHHOME $files | wc -c)
         if [ $SIZE -gt 65536 ]; then
             echo >&2 $'.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: '$SIZE' bytes'
@@ -30,33 +54,30 @@ function sshrc() {
             trap \"rm -rf \$SSHRCCLEANUP; exit\" 0
             echo $'"$(cat "$0" | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/sshrc
             chmod +x \$SSHHOME/sshrc
-
             echo $'"$( cat << 'EOF' | openssl enc -base64
-                if [ -r /etc/profile ]; then source /etc/profile; fi
-                if [ -r ~/.bash_profile ]; then source ~/.bash_profile
-                elif [ -r ~/.bash_login ]; then source ~/.bash_login
-                elif [ -r ~/.profile ]; then source ~/.profile
-                fi
-                export PATH=$PATH:$SSHHOME
-                source $SSHHOME/.sshrc;
+if [ -r /etc/profile ]; then source /etc/profile; fi
+if [ -r ~/.bash_profile ]; then source ~/.bash_profile
+elif [ -r ~/.bash_login ]; then source ~/.bash_login
+elif [ -r ~/.profile ]; then source ~/.profile
+fi
+export PATH=$PATH:$SSHHOME
+source $SSHHOME/.sshrc.d/.sshrc.min;
 EOF
                 )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/sshrc.bashrc
-
             echo $'"$( cat << 'EOF' | openssl enc -base64
 #!/usr/bin/env bash
-                exec bash --rcfile <(echo '
-                [ -r /etc/profile ] && source /etc/profile
-                if [ -r ~/.bash_profile ]; then source ~/.bash_profile
-                elif [ -r ~/.bash_login ]; then source ~/.bash_login
-                elif [ -r ~/.profile ]; then source ~/.profile
-                fi
-                source '$SSHHOME'/.sshrc;
-                export PATH=$PATH:'$SSHHOME'
-                ') "$@"
+exec bash --rcfile <(echo '
+[ -r /etc/profile ] && source /etc/profile
+if [ -r ~/.bash_profile ]; then source ~/.bash_profile
+elif [ -r ~/.bash_login ]; then source ~/.bash_login
+elif [ -r ~/.profile ]; then source ~/.profile
+fi
+source '$SSHHOME'/.sshrc.d/.sshrc.min;
+export PATH=$PATH:'$SSHHOME'
+') "$@"
 EOF
                 )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/bashsshrc
             chmod +x \$SSHHOME/bashsshrc
-
             echo $'"$(tar czf - -h -C $SSHHOME $files | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d | tar mxzf - -C \$SSHHOME
             export SSHHOME=\$SSHHOME
             echo \"$CMDARG\" >> \$SSHHOME/sshrc.bashrc
@@ -67,7 +88,6 @@ EOF
         exit 1
     fi
 }
-
 function sshrc_parse() {
   while [[ -n $1 ]]; do
     case $1 in
@@ -91,7 +111,7 @@ function sshrc_parse() {
     ssh $SSHARGS; exit 1;
   fi
 }
-
 command -v openssl >/dev/null 2>&1 || { echo >&2 "sshrc requires openssl to be installed locally, but it's not. Aborting."; exit 1; }
 sshrc_parse "$@"
 sshrc
+
