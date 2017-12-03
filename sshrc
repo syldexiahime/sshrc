@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Generates a minified .sshrc file
+# Allows other local files to be sourced, by copying the contents of the sourced file and writing it into the minified file
 function generate_minified_rcfile() {
     local temprc=$(sed -r "/(^\s*#(\s|\S)*$)/d" "$SSHHOME/.sshrc")
     IFS_OLD=$IFS
@@ -25,14 +27,27 @@ function generate_minified_rcfile() {
     echo "$minrc" > "$SSHHOME/.sshrc.d/.sshrc.min"
 }
 
-function build_remote_sshrc_dir() {
-    echo "
-            export SSHHOME=\$(mktemp -d -t .$(whoami).sshrc.XXXX)
-            export SSHRCCLEANUP=\$SSHHOME
-            trap \"rm -rf \$SSHRCCLEANUP; exit\" 0
-        "
+function encode() {
+    openssl enc -base64
 }
 
+function decode() {
+    echo 'openssl enc -base64 -d'
+}
+
+function archive_files() {
+    tar cfz - -h -C $SSHHOME $files
+}
+
+function unarchive_files() {
+    echo 'tar mxzf - -C $SSHHOME'
+}
+
+function check_remote_dependencies() {
+    echo "command -v openssl >/dev/null 2>&1 || { echo >&2 \"sshrc requires openssl to be installed on the server, but it's not. Aborting.\"; exit 1; }"
+}
+
+# Creates the welcome message
 function show_welcome_message() {
     if [ -z "$CMDARG" -a ! -e ~/.sshrc.d/.hushlogin ]; then
         echo "
@@ -47,23 +62,27 @@ function show_welcome_message() {
     fi
 }
 
+# Untars and unencodes
 function include_files() {
     echo "
-            echo $'"$(tar czf - -h -C $SSHHOME $files | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d | tar mxzf - -C \$SSHHOME
-            export SSHHOME=\$SSHHOME
-        "
+        export SSHHOME=\$(mktemp -d -t .$(whoami).sshrc.XXXX)
+        export SSHRCCLEANUP=\$SSHHOME
+        trap \"rm -rf \$SSHRCCLEANUP; exit\" 0
+        echo $'"$(archive_files | encode)"' | tr -s ' ' $'\n' | $(decode) | $(unarchive_files)
+        export SSHHOME=\$SSHHOME
+    "
 }
 
 function include_sshrc_bin() {
     echo "
-            echo $'"$(sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*#(\s|\S)*$)/d" "$0" | openssl enc -base64)"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/sshrc
-            chmod +x \$SSHHOME/sshrc
-        "
+        echo $'"$(sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*#(\s|\S)*$)/d" "$0" | encode)"' | tr -s ' ' $'\n' | $(decode) > \$SSHHOME/sshrc
+        chmod +x \$SSHHOME/sshrc
+    "
 }
 
 function source_remote_rcfiles() {
     echo "
-            echo $'"$( cat << 'EOF' | openssl enc -base64
+        echo $'"$( cat << 'EOF' | openssl enc -base64
 if [ -r /etc/profile ]; then source /etc/profile; fi
 if [ -r ~/.bash_profile ]; then source ~/.bash_profile
 elif [ -r ~/.bash_login ]; then source ~/.bash_login
@@ -72,15 +91,18 @@ fi
 export PATH=$PATH:$SSHHOME
 source $SSHHOME/.sshrc.d/.sshrc.min;
 EOF
-                )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/sshrc.bashrc
-            echo \"$CMDARG\" >> \$SSHHOME/sshrc.bashrc
-            bash --rcfile \$SSHHOME/sshrc.bashrc
-        "
+        )"' | tr -s ' ' $'\n' | $(decode) > \$SSHHOME/sshrc.bashrc
+        echo \"$CMDARG\" >> \$SSHHOME/sshrc.bashrc
+        bash --rcfile \$SSHHOME/sshrc.bashrc
+    "
 }
 
+# I genuinely have no idea what this was supposed to do.
+# I removed it from the original script with seemingly no impact at all, but am keeping it
+# temporarily until either I can figure out it's purpose or something breaks without it.
 function do_something() {
     echo "
-            echo $'"$( cat << 'EOF' | openssl enc -base64
+        echo $'"$( cat << 'EOF' | openssl enc -base64
 #!/usr/bin/env bash
 exec bash --rcfile <(echo '
 [ -r /etc/profile ] && source /etc/profile
@@ -92,20 +114,19 @@ source '$SSHHOME'/.sshrc.d/.sshrc.min;
 export PATH=$PATH:'$SSHHOME'
 ') "$@"
 EOF
-                )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/bashsshrc
-            chmod +x \$SSHHOME/bashsshrc
-        "
+        )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/bashsshrc
+        chmod +x \$SSHHOME/bashsshrc
+    "
 }
 
 function build_sshrc_arg() {
     echo "
-            command -v openssl >/dev/null 2>&1 || { echo >&2 \"sshrc requires openssl to be installed on the server, but it's not. Aborting.\"; exit 1; }
-            $(build_remote_sshrc_dir)
-            $(show_welcome_message)
-            $(include_files)
-            $(include_sshrc_bin)
-            $(source_remote_rcfiles)
-        "
+        $(check_remote_dependencies)
+        $(show_welcome_message)
+        $(include_files)
+        $(include_sshrc_bin)
+        $(source_remote_rcfiles)
+    "
 }
 
 function sshrc() {
@@ -113,7 +134,7 @@ function sshrc() {
     if [ -f $SSHHOME/.sshrc ]; then
         generate_minified_rcfile
         local files=".sshrc.d .sshrc.d/.sshrc.min"
-        SIZE=$(tar cfz - -h -C $SSHHOME $files | wc -c)
+        SIZE=$(archive_files | wc -c)
         if [ $SIZE -gt 65536 ]; then
             echo >&2 $'.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: '$SIZE' bytes'
             exit 1
