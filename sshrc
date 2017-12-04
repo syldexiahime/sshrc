@@ -1,30 +1,7 @@
 #!/usr/bin/env bash
-# Generates a minified .sshrc file
-# Allows other local files to be sourced, by copying the contents of the sourced file and writing it into the minified file
-function generate_minified_rcfile() {
-    local temprc=$(sed -r "/(^\s*#(\s|\S)*$)/d" "$SSHHOME/.sshrc")
-    IFS_OLD=$IFS
-    IFS=$'\n'
-    local sourcefiles=($(grep -oP "(?<=source )(\"(\s\S)+\"|\S+)" <<<"$temprc"))
-    IFS=$IFS_OLD
-    local minrc=""
-    while IFS= read -r line; do
-        local writeline="true"
-        for f in ${sourcefiles[@]}; do
-            if [[ $(grep "^\s*source $f" <<<"$line") != "" ]]; then
-                local writeline="false"
-                local file=$(envsubst <<< "${f/\~/'$HOME'}")
-                local cont=$(sed -r "/(^\s*#(\s|\S)*$)/d" "$file")
-                local minrc="$minrc"$'\n'"$cont"$'\n'
-                local sourcefiles=("${sourcefiles[@]/$f}")
-            fi
-        done
-        if [[ "$writeline" == "true" ]]; then
-            minrc="${minrc}${line}"$'\n'
-        fi
-    done <<<"$temprc"
-    minrc=$(sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" <<<"$minrc")
-    echo "$minrc" > "$SSHHOME/.sshrc.d/.sshrc.min"
+
+function minify() {
+    sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*#(\s|\S)*$)/d" "$@"
 }
 
 function encode() {
@@ -36,11 +13,34 @@ function decode() {
 }
 
 function archive_files() {
-    tar cfz - -h -C $SSHHOME $files
+    tar cfz - -h -C $SSHRC_DIR $files
 }
 
 function unarchive_files() {
     echo 'tar mxzf - -C $SSHHOME'
+}
+
+function prepare_files() {
+    local ssh_ip=`echo $SSH_CLIENT | awk '{ print $1 }'`
+    local ssh2_ip=`echo $SSH2_CLIENT | awk '{ print $1 }'`
+    if [ $ssh_ip ] || [ $ssh2_ip ]; then
+        SSHRC_DIR="$SSHHOME"
+    else
+        SSHRC_DIR="/var/tmp/.$(whoami).sshrc"
+        if [ ! -d "$SSHRC_DIR" ]; then
+            mkdir "$SSHRC_DIR"
+            cp "$SSHHOME/.sshrc" "$SSHRC_DIR"
+            cp -r "$SSHHOME/.sshrc.d" "$SSHRC_DIR/.sshrc.d"
+        fi
+        if [ -d "$SSHRC_DIR/bash" ]; then
+            for file in $(find "$SSHRC_DIR/bash"); do
+                minify -i "$file"
+            done
+        fi
+        if [ -f "$SSHRC_DIR/.vimrc" ]; then
+            sed -i -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*#(\s|\S)*$)/d" "$file"
+        fi
+    fi
 }
 
 function check_remote_dependencies() {
@@ -75,8 +75,9 @@ function include_files() {
 
 function include_sshrc_bin() {
     echo "
-        echo $'"$(sed -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*#(\s|\S)*$)/d" "$0" | encode)"' | tr -s ' ' $'\n' | $(decode) > \$SSHHOME/sshrc
-        chmod +x \$SSHHOME/sshrc
+        mkdir \$SSHHOME/bin
+        echo $'"$(minify "$0" | encode)"' | tr -s ' ' $'\n' | $(decode) > \$SSHHOME/bin/sshrc
+        chmod +x \$SSHHOME/bin/sshrc
     "
 }
 
@@ -88,8 +89,8 @@ if [ -r ~/.bash_profile ]; then source ~/.bash_profile
 elif [ -r ~/.bash_login ]; then source ~/.bash_login
 elif [ -r ~/.profile ]; then source ~/.profile
 fi
-export PATH=$PATH:$SSHHOME
-source $SSHHOME/.sshrc.d/.sshrc.min;
+export PATH=$PATH:$SSHHOME/bin
+source $SSHHOME/.sshrc;
 EOF
         )"' | tr -s ' ' $'\n' | $(decode) > \$SSHHOME/sshrc.bashrc
         echo \"$CMDARG\" >> \$SSHHOME/sshrc.bashrc
@@ -110,8 +111,8 @@ if [ -r ~/.bash_profile ]; then source ~/.bash_profile
 elif [ -r ~/.bash_login ]; then source ~/.bash_login
 elif [ -r ~/.profile ]; then source ~/.profile
 fi
-source '$SSHHOME'/.sshrc.d/.sshrc.min;
-export PATH=$PATH:'$SSHHOME'
+source '$SSHHOME'/.sshrc;
+export PATH=$PATH:'$SSHHOME'/bin
 ') "$@"
 EOF
         )"' | tr -s ' ' $'\n' | openssl enc -base64 -d > \$SSHHOME/bashsshrc
@@ -132,8 +133,8 @@ function build_sshrc_arg() {
 function sshrc() {
     local SSHHOME=${SSHHOME:=~}
     if [ -f $SSHHOME/.sshrc ]; then
-        generate_minified_rcfile
-        local files=".sshrc.d .sshrc.d/.sshrc.min"
+        prepare_files
+        local files=".sshrc .sshrc.d"
         SIZE=$(archive_files | wc -c)
         if [ $SIZE -gt 65536 ]; then
             echo >&2 $'.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: '$SIZE' bytes'
