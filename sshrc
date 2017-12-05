@@ -27,18 +27,32 @@ function prepare_files() {
         SSHRC_DIR="$SSHHOME"
     else
         SSHRC_DIR="/var/tmp/.$(whoami).sshrc"
+        sshrc_hash=$(stat -c "%n %s %Y" "$SSHHOME/.sshrc" `find "$SSHHOME/.sshrc.d"` | md5sum | awk '{print $1}')
         if [ ! -d "$SSHRC_DIR" ]; then
             mkdir "$SSHRC_DIR"
             cp "$SSHHOME/.sshrc" "$SSHRC_DIR"
-            cp -r "$SSHHOME/.sshrc.d" "$SSHRC_DIR/.sshrc.d"
-        fi
-        if [ -d "$SSHRC_DIR/bash" ]; then
-            for file in $(find "$SSHRC_DIR/bash"); do
-                minify -i "$file"
-            done
-        fi
-        if [ -f "$SSHRC_DIR/.vimrc" ]; then
-            sed -i -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*#(\s|\S)*$)/d" "$file"
+            cp -r "$SSHHOME/.sshrc.d" "$SSHRC_DIR"
+        else
+            if [[ $(<"$SSHRC_DIR/sshrchash") != "$sshrc_hash" ]]; then
+                rm "$SSHRC_DIR"
+                mkdir "$SSHRC_DIR"
+                cp "$SSHHOME/.sshrc" "$SSHRC_DIR"
+                cp -r "$SSHHOME/.sshrc.d" "$SSHRC_DIR"
+                echo "$sshrc_hash" > "$SSHRC_DIR/sshrchash"
+                if [ -d "$SSHRC_DIR/.sshrc.d/bash" ]; then
+                    for file in $(find "$SSHRC_DIR/.sshrc.d/bash"); do
+                        if [ -f "$file" ]; then minify -i "$file"; fi
+                    done
+                fi
+                if [ -f "${SSHRC_DIR}/.sshrc.d/.vimrc" ]; then
+                    sed -i -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*\"([^\"])*$)/d" "$file"
+                fi
+                for file in $(find "$SSHRC_DIR/.sshrc.d"); do
+                    if [[ "$file" == /*.vim ]] && [ -f "$file" ]; then sed -i -r -e "s/^\s+|\s+$//g" -e "/^$/d" -e "/(^\s*\"([^\"])*$)/d" "$file"; fi
+                    if [[ "$file" == /*README.md ]]; then rm "$file"; fi
+                    if [[ "$file" == /*.git ]] && [ -d "$file" ]; then rm -r "$file"; fi
+                done
+            fi
         fi
     fi
 }
