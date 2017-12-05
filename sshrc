@@ -23,7 +23,7 @@ function unarchive_files() {
 function prepare_files() {
     local ssh_ip=`echo $SSH_CLIENT | awk '{ print $1 }'`
     local ssh2_ip=`echo $SSH2_CLIENT | awk '{ print $1 }'`
-    if [ $ssh_ip ] || [ $ssh2_ip ]; then
+    if [ $ssh_ip ] || [ $ssh2_ip ] || [[ ! "$MINIMISE" == "true" ]]; then
         SSHRC_DIR="$SSHHOME"
     else
         SSHRC_DIR="/var/tmp/.$(whoami).sshrc"
@@ -33,7 +33,7 @@ function prepare_files() {
             cp "$SSHHOME/.sshrc" "$SSHRC_DIR"
             cp -r "$SSHHOME/.sshrc.d" "$SSHRC_DIR"
         else
-            if [[ $(<"$SSHRC_DIR/sshrchash") != "$sshrc_hash" ]]; then
+            if [[ $(<"$SSHRC_DIR/sshrchash") != "$sshrc_hash" ]] || [[ "$REGENERATE_MINFILES" == "true" ]]; then
                 rm "$SSHRC_DIR"
                 mkdir "$SSHRC_DIR"
                 cp "$SSHHOME/.sshrc" "$SSHRC_DIR"
@@ -53,6 +53,22 @@ function prepare_files() {
                     if [[ "$file" == /*.git ]] && [ -d "$file" ]; then rm -r "$file"; fi
                 done
             fi
+        fi
+    fi
+}
+
+function check_size() {
+    local size=$(archive_files | wc -c)
+    if [[ "$IGNORE_MAX_SIZE" == "true" ]]; then
+        if [[ "$SHOW_SIZE" == "true" ]]; then
+            echo .sshrc.d and .sshrc file size: $size
+        fi
+    else
+        if [ $size -gt 65536 ]; then
+            echo >&2 $'.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: '$SIZE' bytes'
+            exit 1
+        elif [[ "$SHOW_SIZE" == "true" ]]; then
+            echo archived file size: $size
         fi
     fi
 }
@@ -78,21 +94,21 @@ function show_welcome_message() {
 
 # Untars and unencodes
 function include_files() {
-    echo "
+    local incfiles="
         export SSHHOME=\$(mktemp -d -t .$(whoami).sshrc.XXXX)
         export SSHRCCLEANUP=\$SSHHOME
         trap \"rm -rf \$SSHRCCLEANUP; exit\" 0
         echo $'"$(archive_files | encode)"' | tr -s ' ' $'\n' | $(decode) | $(unarchive_files)
         export SSHHOME=\$SSHHOME
     "
-}
-
-function include_sshrc_bin() {
-    echo "
-        mkdir \$SSHHOME/bin
-        echo $'"$(minify "$0" | encode)"' | tr -s ' ' $'\n' | $(decode) > \$SSHHOME/bin/sshrc
-        chmod +x \$SSHHOME/bin/sshrc
-    "
+    if [[ "$INCLUDE_BIN" == "true" ]]; then
+        local incfiles="$incfiles
+            mkdir \$SSHHOME/bin
+            echo $'"$(minify "$0" | encode)"' | tr -s ' ' $'\n' | $(decode) > \$SSHHOME/bin/sshrc
+            chmod +x \$SSHHOME/bin/sshrc
+        "
+    fi
+    echo "$incfiles"
 }
 
 function source_remote_rcfiles() {
@@ -139,7 +155,6 @@ function build_sshrc_arg() {
         $(check_remote_dependencies)
         $(show_welcome_message)
         $(include_files)
-        $(include_sshrc_bin)
         $(source_remote_rcfiles)
     "
 }
@@ -149,11 +164,7 @@ function sshrc() {
     if [ -f $SSHHOME/.sshrc ]; then
         prepare_files
         local files=".sshrc .sshrc.d"
-        SIZE=$(archive_files | wc -c)
-        if [ $SIZE -gt 65536 ]; then
-            echo >&2 $'.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: '$SIZE' bytes'
-            exit 1
-        fi
+        check_size
         ssh -t "$DOMAIN" $SSHARGS "$(build_sshrc_arg)"
     else
         echo "No such file: $SSHHOME/.sshrc" >&2
@@ -162,27 +173,42 @@ function sshrc() {
 }
 
 function sshrc_parse() {
-  while [[ -n $1 ]]; do
-    case $1 in
-      -b | -c | -D | -E | -e | -F | -I | -i | -L | -l | -m | -O | -o | -p | -Q | -R | -S | -W | -w )
-        SSHARGS="$SSHARGS $1 $2"; shift ;;
-      -* )
-        SSHARGS="$SSHARGS $1" ;;
-      *)
-        if [ -z "$DOMAIN" ]; then
-         DOMAIN="$1"
-        else
-          local SEMICOLON=$([[ "$@" = *[![:space:]]* ]] && echo '; ')
-          CMDARG="$@$SEMICOLON exit"
-          return;
-        fi
-        ;;
-    esac
-    shift
-  done
-  if [ -z $DOMAIN ]; then
-    ssh $SSHARGS; exit 1;
-  fi
+    while [[ -n $1 ]]; do
+        case $1 in
+            --include-bin )
+                INCLUDE_BIN="true" ;;
+            --ignore-max-size )
+                IGNORE_MAX_SIZE="true" ;;
+            --show-size )
+                SHOW_SIZE="true" ;;
+            --minimise-files )
+                MINIMISE="true" ;;
+            --regen-minfiles )
+                REGENERATE_MINFILES="true" ;;
+            --* )
+                echo sshrc: unkown option: "$1" ;;
+            -b | -c | -D | -E | -e | -F | -I | -i | -L | -l | -m | -O | -o | -p | -Q | -R | -S | -W | -w )
+                SSHARGS="$SSHARGS $1 $2"; shift ;;
+            -* )
+                SSHARGS="$SSHARGS $1" ;;
+            *)
+                if [ -z "$DOMAIN" ]; then
+                    DOMAIN="$1"
+                else
+                    local SEMICOLON=$([[ "$@" = *[![:space:]]* ]] && echo '; ')
+                    CMDARG="$@$SEMICOLON exit"
+                    return;
+                fi
+            ;;
+        esac
+        shift
+    done
+    if [ -z $DOMAIN ]; then
+        ssh $SSHARGS; exit 1;
+    fi
+    if [[ "$REGENERATE_MINFILES" == "true" ]] && [[ ! "$MINIMISE" == "true" ]]; then
+        echo Cannot use --regen-minfiles without --minimize; exit
+    fi
 }
 command -v openssl >/dev/null 2>&1 || { echo >&2 "sshrc requires openssl to be installed locally, but it's not. Aborting."; exit 1; }
 sshrc_parse "$@"
