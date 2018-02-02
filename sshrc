@@ -34,7 +34,7 @@ function prepare_files() {
             cp -r "$SSHHOME/.sshrc.d" "$SSHRC_DIR"
         else
             if [[ $(<"$SSHRC_DIR/sshrchash") != "$sshrc_hash" ]] || [[ "$REGENERATE_MINFILES" == "true" ]]; then
-                rm "$SSHRC_DIR"
+                rm -rf "$SSHRC_DIR"
                 mkdir "$SSHRC_DIR"
                 cp "$SSHHOME/.sshrc" "$SSHRC_DIR"
                 cp -r "$SSHHOME/.sshrc.d" "$SSHRC_DIR"
@@ -151,12 +151,12 @@ EOF
 }
 
 function build_sshrc_arg() {
-    echo "
-        $(check_remote_dependencies)
-        $(show_welcome_message)
-        $(include_files)
-        $(source_remote_rcfiles)
-    "
+    echo <<- EOF
+	$(check_remote_dependencies)
+	$(show_welcome_message)
+	$(include_files)
+	$(source_remote_rcfiles)
+	EOF
 }
 
 function sshrc() {
