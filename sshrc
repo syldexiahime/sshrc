@@ -151,12 +151,12 @@ EOF
 }
 
 function build_sshrc_arg() {
-    echo <<- EOF
-	$(check_remote_dependencies)
-	$(show_welcome_message)
-	$(include_files)
-	$(source_remote_rcfiles)
-	EOF
+    echo "
+        $(check_remote_dependencies)
+        $(show_welcome_message)
+        $(include_files)
+        $(source_remote_rcfiles)
+    "
 }
 
 function sshrc() {
